@@ -12,7 +12,7 @@ This repository contains the official implementation of **LapSum**, a novel appr
 │ └── README.md  # Instructions
 ├── lapsum/  # Core library implementation
 │ └── README.md  # Installation and usage instructions
-├── notebooks/  # Pure PyTorch implementations with usage examples
+├── tutorial_notebooks/  # Pure PyTorch implementations with usage examples
 └── README.md  # are you here
 ```
 
