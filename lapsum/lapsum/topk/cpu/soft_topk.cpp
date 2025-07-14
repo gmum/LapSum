@@ -1,0 +1,561 @@
+//
+// Created by lstruski
+//
+
+#include <ATen/ATen.h>
+#include <torch/extension.h>
+#include <vector>
+#include <cmath>
+
+// Macros to ensure tensors are on the CPU and contiguous
+#define CHECK_CPU(x) TORCH_CHECK(x.device().is_cpu(), #x " must be a CPU tensor")
+#define CHECK_CONTIGUOUS(x) TORCH_CHECK(x.is_contiguous(), #x " must be contiguous")
+#define CHECK_INPUT(x) CHECK_CPU(x); CHECK_CONTIGUOUS(x)
+
+/**
+ **************************************************************************************************************
+ *                                            Basic operations
+ **************************************************************************************************************
+**/
+
+/*
+ * Function to compute the probability density function (PDF) of a Laplace distribution.
+ * @param x: Input value.
+ * @param alpha: Scale parameter of the Laplace distribution.
+ * @return: PDF value at x.
+ */
+template <typename T>
+T pdfLap(T x, T alpha) {
+    return std::exp(-std::abs(x / alpha)) / (2 * alpha);
+}
+
+/*
+ * Function to compute the cumulative distribution function (CDF) of a Laplace distribution.
+ * @param x: Input value.
+ * @param alpha: Scale parameter of the Laplace distribution.
+ * @return: CDF value at x.
+ */
+template <typename T>
+T cdfLap(T x, T alpha) {
+    T val = x / alpha;
+    if (val <= 0) {
+        return 0.5 * std::exp(val);
+    }
+    return 1 - 0.5 * std::exp(-val);
+}
+
+/*
+ * Function to solve the equation exp(a)/2*exp(x-s)-exp(b)/2*exp(r-x)+c=w.
+ * @param r, s: Input parameters.
+ * @param a, b, c, w: Equation coefficients.
+ * @param alpha: Scale parameter of the Laplace distribution.
+ * @return: Solution to the equation.
+ */
+template <typename T>
+T solveExp(T r, T s, T a, T b, T c, T w, T alpha) {
+    if (w > c && a > 0) {
+        T diff = w - c;
+        return s - alpha * std::log(a) + alpha * std::log(
+            diff + std::sqrt(diff * diff + std::exp((r - s) / alpha) * a * b));
+    }
+    if (w == c && a > 0 && b > 0) {
+        return 0.5 * (r + s + alpha * (std::log(b) - std::log(a)));
+    }
+    if (w < c) {
+        T diff = c - w;
+        return r + alpha * std::log(b) - alpha * std::log(
+            diff + std::sqrt(diff * diff + std::exp((r - s) / alpha) * a * b));
+    }
+    return 0.5 * (r + s);
+}
+
+/*
+ * Forward wrapper function to compute intermediate values and results.
+ * @param input: Input array.
+ * @param w: Weight array.
+ * @param results: Output array to store results.
+ * @param n: Number of elements in the input array.
+ * @param m: Number of elements in the weight array.
+ * @param batch_size: Number of batches.
+ * @param alpha: Scale parameter of the Laplace distribution.
+ */
+template <typename T>
+void forward_wrapper(const T* input, const T* w, T* results,
+                     const int n, const int m, const int batch_size, const T alpha) {
+    for (int bs = 0; bs < batch_size; ++bs) {
+        int middle, start = 0, end = n - 1;
+        middle = (start + end) / 2;
+
+        T a_start = 0, a_mid = 0, a_end = 0;
+        for (int i = middle + 1; i <= end; ++i) {
+            a_mid += std::exp((input[bs * n + middle] - input[bs * n + i]) / alpha);
+        }
+        for (int i = start + 1; i <= middle; ++i) {
+            a_start += std::exp((input[bs * n + start] - input[bs * n + i]) / alpha);
+        }
+        a_start += std::exp((input[bs * n + start] - input[bs * n + middle]) / alpha) * a_mid;
+
+        T b_start = 0, b_mid = 0, b_end = 0;
+        for (int i = start; i < middle; ++i) {
+            b_mid += std::exp((input[bs * n + i] - input[bs * n + middle]) / alpha);
+        }
+        for (int i = middle; i < end; ++i) {
+            b_end += std::exp((input[bs * n + i] - input[bs * n + end]) / alpha);
+        }
+        b_end += std::exp((input[bs * n + middle] - input[bs * n + end]) / alpha) * b_mid;
+
+        for (int i = 0; i < m; ++i) {
+            if (w[bs * m + i] <= 0.5 * (a_start - b_start + 1)) {
+                results[bs * m + i] = solveExp(
+                        input[bs * n], input[bs * n], 1 + a_start,
+                        static_cast<T>(0), static_cast<T>(0), w[bs * m + i], alpha
+                    );
+            } else if (w[bs * m + i] >= 0.5 * (a_end - b_end + 1) + static_cast<T>(end)) {
+                results[bs * m + i] = solveExp(
+                        input[(bs + 1) * n - 1], input[(bs + 1) * n - 1], static_cast<T>(0),
+                        1 + b_end, static_cast<T>(n), w[bs * m + i], alpha
+                    );
+            } else {
+                int l = start, mid = middle, r = end;
+                T a_s = a_start, b_s = b_start, a_m = a_mid, b_m = b_mid, a_e = a_end, b_e = b_end;
+                while (l + 1 < r) {
+                    if (w[bs * m + i] <= 0.5 * (a_m - b_m + 1) + static_cast<T>(mid)) {
+                        r = mid;
+                        a_e = a_m;
+                        b_e = b_m;
+                    } else {
+                        l = mid;
+                        a_s = a_m;
+                        b_s = b_m;
+                    }
+                    mid = (l + r) / 2;
+                    a_m = 0;
+                    for (int j = mid + 1; j <= r; ++j) {
+                        a_m += std::exp((input[bs * n + mid] - input[bs * n + j]) / alpha);
+                    }
+                    a_m += std::exp((input[bs * n + mid] - input[bs * n + r]) / alpha) * a_e;
+                    b_m = 0;
+                    for (int j = l; j < mid; ++j) {
+                        b_m += std::exp((input[bs * n + j] - input[bs * n + mid]) / alpha);
+                    }
+                    b_m += std::exp((input[bs * n + l] - input[bs * n + mid]) / alpha) * b_s;
+                }
+                results[bs * m + i] = solveExp(
+                    input[bs * n + l], input[bs * n + r], 1 + a_e, 1 + b_s,
+                    static_cast<T>(1 + l), w[bs * m + i], alpha
+                );
+            }
+        }
+    }
+}
+
+
+/*
+ * Function to calculate the probability of the forward past.
+ * @param input: Input array with shape (batch_size, n).
+ * @param output: Output array of Lap-Sum function with shape (batch_size, m).
+ * @param prob: Array to store probabilities.
+ * @param n: Number of elements in the input array.
+ * @param m: Number of elements in the output array.
+ * @param batch_size: Number of batches.
+ * @param alpha: Scale parameter of the Laplace distribution.
+ */
+template <typename T>
+void probability(const T* input, const T* output, T* prob,
+                 const int n, const int m, const int batch_size, const T alpha) {
+    int in_off, out_off, lp_off, out_idx, lp_row;
+    for (int bs = 0; bs < batch_size; ++bs) {
+        in_off = bs * n;
+        out_off = bs * m;
+        lp_off = bs * n * m;
+
+        for (int i = 0; i < m; ++i) {
+            out_idx = out_off + i;
+            lp_row = lp_off + i * n;
+
+            for (int j = 0; j < n; ++j) {
+                prob[lp_row + j] = cdfLap(output[out_idx] - input[in_off + j], alpha);
+            }
+        }
+    }
+}
+
+
+////#ifdef _OPENMP
+//#include <omp.h>
+//
+//template <typename T>
+//void forward_wrapper_parallel(const T* input, const T* w, T* results,
+//                              const int n, const int m, const int batch_size, const T alpha) {
+//    const T inv_alpha = 1.0 / alpha;
+//    constexpr int cache_line_size = 64;
+//
+//    #pragma omp parallel for schedule(dynamic)
+//    for (int bs = 0; bs < batch_size; ++bs) {
+//        alignas(cache_line_size) T local_a[3] = {0};
+//        alignas(cache_line_size) T local_b[3] = {0};
+//
+//        const int start = 0;
+//        const int end = n - 1;
+//        const int middle = (start + end) / 2;
+//
+//        const T* current_input = input + bs * n;
+//        const T* current_w = w + bs * m;
+//        T* current_results = results + bs * m;
+//
+//        T exp_temp;
+//        for (int i = middle + 1; i <= end; ++i) {
+//            exp_temp = std::exp((current_input[middle] - current_input[i]) * inv_alpha);
+//            local_a[1] += exp_temp;
+//        }
+//        for (int i = start + 1; i <= middle; ++i) {
+//            exp_temp = std::exp((current_input[start] - current_input[i]) * inv_alpha);
+//            local_a[0] += exp_temp;
+//        }
+//        local_a[0] += std::exp((current_input[start] - current_input[middle]) * inv_alpha) * local_a[1];
+//
+//        for (int i = start; i < middle; ++i) {
+//            exp_temp = std::exp((current_input[i] - current_input[middle]) * inv_alpha);
+//            local_b[1] += exp_temp;
+//        }
+//        for (int i = middle; i < end; ++i) {
+//            exp_temp = std::exp((current_input[i] - current_input[end]) * inv_alpha);
+//            local_b[2] += exp_temp;
+//        }
+//        local_b[2] += std::exp((current_input[middle] - current_input[end]) * inv_alpha) * local_b[1];
+//
+//        for (int i = 0; i < m; ++i) {
+//            const T w_val = current_w[i];
+//            const T threshold_low = 0.5 * (local_a[0] - local_b[0] + 1);
+//            const T threshold_high = 0.5 * (local_a[2] - local_b[2] + 1) + static_cast<T>(end);
+//
+//            if (w_val <= threshold_low) {
+//                current_results[i] = solveExp(
+//                    current_input[0], current_input[0], 1 + local_a[0],
+//                    static_cast<T>(0), static_cast<T>(0), w_val, alpha
+//                );
+//            } else if (w_val >= threshold_high) {
+//                current_results[i] = solveExp(
+//                    current_input[end], current_input[end], static_cast<T>(0),
+//                    1 + local_b[2], static_cast<T>(n), w_val, alpha
+//                );
+//            } else {
+//                int l = start, mid = middle, r = end;
+//                T a_s = local_a[0], b_s = local_b[0], a_m = local_a[1], b_m = local_b[1], a_e = local_a[2], b_e = local_b[2];
+//
+//                while (l + 1 < r) {
+//                    const T mid_threshold = 0.5 * (a_m - b_m + 1) + static_cast<T>(mid);
+//                    if (w_val <= mid_threshold) {
+//                        r = mid;
+//                        a_e = a_m;
+//                        b_e = b_m;
+//                    } else {
+//                        l = mid;
+//                        a_s = a_m;
+//                        b_s = b_m;
+//                    }
+//
+//                    mid = (l + r) / 2;
+//                    a_m = 0;
+//                    for (int j = mid + 1; j <= r; ++j) {
+//                        a_m += std::exp((current_input[mid] - current_input[j]) * inv_alpha);
+//                    }
+//                    a_m += std::exp((current_input[mid] - current_input[r]) * inv_alpha) * a_e;
+//
+//                    b_m = 0;
+//                    for (int j = l; j < mid; ++j) {
+//                        b_m += std::exp((current_input[j] - current_input[mid]) * inv_alpha);
+//                    }
+//                    b_m += std::exp((current_input[l] - current_input[mid]) * inv_alpha) * b_s;
+//                }
+//
+//                current_results[i] = solveExp(
+//                    current_input[l], current_input[r], 1 + a_e, 1 + b_s,
+//                    static_cast<T>(1 + l), w_val, alpha
+//                );
+//            }
+//        }
+//    }
+//}
+//
+//template <typename T>
+//void probability_parallel(const T* input, const T* output, T* prob,
+//                        const int n, const int m, const int batch_size, const T alpha) {
+//    const int chunk_size = batch_size > 1000 ? std::max(32, batch_size / (4 * omp_get_max_threads())) : 1;
+//
+//    #pragma omp parallel for schedule(dynamic, chunk_size)
+//    for (int bs = 0; bs < batch_size; ++bs) {
+//        const int in_off = bs * n;
+//        const int out_off = bs * m;
+//        const int lp_off = bs * n * m;
+//
+//        const T* current_input = input + in_off;
+//        const T* current_output = output + out_off;
+//        T* current_prob = prob + lp_off;
+//
+//        for (int i = 0; i < m; ++i) {
+//            const T out_val = current_output[i];
+//            T* prob_row = current_prob + i * n;
+//
+//            for (int j = 0; j < n; ++j) {
+//                prob_row[j] = cdfLap(out_val - current_input[j], alpha);
+//            }
+//        }
+//    }
+//}
+//
+//template <typename T>
+//void forward_wrapper_optimized(const T* input, const T* w, T* results,
+//                             const int n, const int m, const int batch_size, const T alpha) {
+//    forward_wrapper_parallel(input, w, results, n, m, batch_size, alpha);
+//}
+//
+//template <typename T>
+//void probability_optimized(const T* input, const T* output, T* prob,
+//                        const int n, const int m, const int batch_size, const T alpha) {
+//    probability_parallel(input, output, prob, n, m, batch_size, alpha);
+//}
+
+//#else
+
+template <typename T>
+void forward_wrapper_optimized(const T* input, const T* w, T* results,
+                             const int n, const int m, const int batch_size, const T alpha) {
+    forward_wrapper(input, w, results, n, m, batch_size, alpha);
+}
+
+template <typename T>
+void probability_optimized(const T* input, const T* output, T* prob,
+                        const int n, const int m, const int batch_size, const T alpha) {
+    probability(input, output, prob, n, m, batch_size, alpha);
+}
+
+//#endif
+
+
+
+
+
+/**
+ **************************************************************************************************************
+ *                                               Forward pass
+ **************************************************************************************************************
+**/
+
+/**
+ * Performs the forward pass for the Soft Top-K algorithm using the Lap-Sum function.
+ * This function computes the output of the Lap-Sum operation and the associated probability tensor
+ * based on the input tensor, weight tensor, and the Laplace distribution scale parameter.
+ *
+ * @param input: Input tensor of shape (batch_size, n).
+ * @param w: Weight tensor of shape (batch_size, m). Values must lie in the interval (0, n).
+ * @param alpha: Scale parameter for the Laplace distribution, controlling the sharpness of the distribution.
+ * @return: A tuple containing:
+ *          - The output tensor of the Lap-Sum function with shape (batch_size, m).
+ *          - The probability tensor with shape (batch_size, m, n), representing the computed probabilities.
+ */
+std::vector<at::Tensor> forward(at::Tensor input, at::Tensor w, const float alpha = -1) {
+    // Ensure alpha is not zero
+    assert((alpha != 0) && "Parameter 'alpha' can not be zero!");
+
+    // Ensure input and w are CPU tensors and contiguous
+    CHECK_INPUT(input);
+    CHECK_INPUT(w);
+
+    // Extract dimensions
+    auto batch_size = input.size(0);
+    auto n = input.size(1);
+    auto m = w.size(1);
+
+    // Ensure input and w have the correct dimensions
+    TORCH_CHECK(input.dim() == 2, "Tensor 'input' must have 2 dimensions");
+    TORCH_CHECK(w.dim() == 2, "Tensor 'w' must have 2 dimensions");
+    TORCH_CHECK(batch_size == w.size(0), "The first dimensions of 'input' and 'w' should be equal.");
+
+    // Sort input and w tensors
+    at::Tensor sorted_input, indices;
+    std::tie(sorted_input, indices) = at::sort(input, /*dim=*/1, /*descending=*/(alpha < 0));
+
+    // Allocate output tensors
+    auto results = at::empty_like(w);
+    auto prob = at::empty({batch_size, m, n}, input.options());
+
+    // Dispatch based on the input type (float or double)
+    AT_DISPATCH_FLOATING_TYPES(input.scalar_type(), "forward_wrapper", ([&] {
+        const auto sorted_input_ptr = sorted_input.data_ptr<scalar_t>();
+        const auto w_ptr = w.data_ptr<scalar_t>();
+        auto results_ptr = results.data_ptr<scalar_t>();
+
+        forward_wrapper_optimized<scalar_t>(sorted_input_ptr, w_ptr, results_ptr,
+                                  n, m, batch_size, static_cast<scalar_t>(alpha));
+    }));
+
+    // Compute probabilities
+    AT_DISPATCH_FLOATING_TYPES(input.scalar_type(), "probability", ([&] {
+        const auto input_ptr = input.data_ptr<scalar_t>();
+        auto results_ptr = results.data_ptr<scalar_t>();
+        auto prob_ptr = prob.data_ptr<scalar_t>();
+
+        probability_optimized<scalar_t>(input_ptr, results_ptr, prob_ptr,
+                              n, m, batch_size, static_cast<scalar_t>(alpha));
+    }));
+
+    // Return the results and probabilities
+    return {results, prob};
+}
+
+
+/**
+ **************************************************************************************************************
+ *                                            Calculate gradients
+ **************************************************************************************************************
+**/
+
+/**
+ * Computes the Jacobian-vector product (JVP) for the Soft-Top-k algorithm.
+ * This function is designed to efficiently compute gradients for the input, weights (w),
+ * and the scale parameter (alpha) of the Laplace distribution, while avoiding unnecessary
+ * computations when `grad_w` and `grad_alpha` are not required.
+ *
+ * @param input: Input tensor of shape (batch_size, n).
+ * @param output: Output tensor of Lap-Sum function with shape (batch_size, m).
+ * @param v: Tensor of shape (batch_size, m, n) used in the JVP computation.
+ * @param grad: Gradient tensor with respect to the input, of shape (batch_size, n).
+ * @param grad_w: Gradient tensor with respect to the weights (w), of shape (batch_size, m).
+ * @param grad_alpha: Gradient tensor with respect to the scale parameter (alpha), of shape (1).
+ * @param n: Number of elements in the input dimension.
+ * @param m: Number of elements in the output dimension.
+ * @param batch_size: Number of samples in the batch.
+ * @param alpha: Scale parameter for the Laplace distribution.
+ */
+template <typename T>
+void derivative_jvp(const T* input, const T* output, const T* v, T* grad, T* grad_w, T* grad_alpha,
+    const int n, const int m, const int batch_size, const T alpha) {
+    T value, batch_sum, scalar_prod, scalar_prod_alpha;
+    int in_off, out_off, der_off, in_idx, out_idx, idx;
+
+    std::vector<T> _temp(n);
+
+    // Iterate over each batch
+    for (int bs = 0; bs < batch_size; ++bs) {
+        in_off = bs * n;
+        out_off = bs * m;
+        der_off = bs * n * m;
+
+        // Iterate over each output dimension
+        for (int j = 0; j < m; ++j) {
+            out_idx = out_off + j;
+            idx = der_off + j * n;
+            batch_sum = 0;
+            scalar_prod = 0;
+            scalar_prod_alpha = 0;
+
+            // Iterate over each input dimension
+            for (int i = 0; i < n; ++i) {
+                in_idx = in_off + i;
+                value = pdfLap(output[out_idx] - input[in_idx], alpha);
+                batch_sum += value;
+                _temp[i] = value;
+                scalar_prod += value * v[idx + i];
+                scalar_prod_alpha += value * input[in_idx];
+            }
+            // Avoid division by zero
+            batch_sum = batch_sum != 0 ? batch_sum : 1;
+            scalar_prod /= batch_sum;
+            scalar_prod_alpha /= batch_sum;
+
+            // Update gradients for input, w, and alpha
+            for (int i = 0; i < n; ++i) {
+                in_idx = idx + i;
+
+                grad_alpha[0] += _temp[i] * (input[in_idx] - scalar_prod_alpha) * v[in_idx];
+                grad[in_off + i] += _temp[i] * (scalar_prod - v[in_idx]);
+            }
+            grad_w[out_idx] = scalar_prod;
+        }
+    }
+    grad_alpha[0] /= alpha;
+}
+
+/**
+ * Computes the Jacobian-vector product (JVP) for the Soft-Top-k algorithm and the derivatives
+ * of the probability with respect to the input, weights (w), and the scale parameter (alpha).
+ * This function is used to efficiently compute gradients for the input, weights, and alpha
+ * in the context of the Laplace distribution-based Soft-Top-k operation.
+ *
+ * @param input: Input tensor of shape (batch_size, n).
+ * @param output: Output tensor of the Lap-Sum function with shape (batch_size, m).
+ * @param v: Tensor of shape (batch_size, m, n) used in the JVP computation.
+ * @param alpha: Scale parameter for the Laplace distribution.
+ * @return: A tuple of gradient tensors with shapes:
+ *          - Gradient with respect to input: (batch_size, n)
+ *          - Gradient with respect to weights (w): (batch_size, m)
+ *          - Gradient with respect to alpha: (1)
+ */
+std::vector<at::Tensor> jvp(at::Tensor input, at::Tensor output, at::Tensor v, const float alpha = -1) {
+    // Ensure alpha is not zero
+    assert((alpha != 0) && "Parameter 'alpha' can not be zero!");
+
+    // Ensure input tensors are valid
+    CHECK_INPUT(input);
+    CHECK_INPUT(output);
+    CHECK_INPUT(v);
+
+    // Check tensor dimensions
+    TORCH_CHECK(input.dim() == 2, "'input' tensor must have 2 dimensions");
+    TORCH_CHECK(output.dim() == 2, "'output' tensor must have 2 dimensions");
+    TORCH_CHECK(v.dim() == 3, "Tensor 'v' must have 3 dimensions.");
+    TORCH_CHECK(input.size(0) == output.size(0), "The first dimensions of 'input' and 'output' should be equal.");
+
+    // Extract dimensions
+    auto batch_size = input.size(0);
+    auto n = input.size(1);
+    auto m = output.size(1);
+
+    auto grad = at::zeros_like(input);
+    auto grad_w = at::empty_like(output);
+    auto grad_alpha = at::zeros({1}, input.options());
+
+    // Dispatch based on the input type (float or double)
+    AT_DISPATCH_FLOATING_TYPES(input.scalar_type(), "derivative", ([&] {
+        const auto input_ptr = input.data_ptr<scalar_t>();
+        const auto output_ptr = output.data_ptr<scalar_t>();
+        const auto v_ptr = v.data_ptr<scalar_t>();
+        auto grad_ptr = grad.data_ptr<scalar_t>();
+        auto grad_w_ptr = grad_w.data_ptr<scalar_t>();
+        auto grad_alpha_ptr = grad_alpha.data_ptr<scalar_t>();
+
+        derivative_jvp<scalar_t>(input_ptr, output_ptr, v_ptr, grad_ptr, grad_w_ptr, grad_alpha_ptr,
+            n, m, batch_size, static_cast<scalar_t>(alpha));
+    }));
+
+    return {grad, grad_w, grad_alpha};
+}
+
+/**
+ * Computes the vector-Jacobian product (VJP) for the Soft-Top-k algorithm and the derivative
+ * of the probability with respect to the scale parameter (alpha). This function is used to
+ * efficiently compute gradients for the input tensor in the context of the Laplace
+ * distribution-based Soft-Top-k operation.
+ *
+ * @param input: Input tensor of shape (batch_size, n).
+ * @param output: Output tensor of the Lap-Sum function with shape (batch_size, m).
+ * @param v: Tensor of shape (batch_size, m, n) used in the VJP computation.
+ * @param alpha: Scale parameter for the Laplace distribution, controlling the sharpness of the distribution.
+ * @return: A tuple of gradient tensors with shapes:
+ *          - Gradient with respect to input: (batch_size, n)
+ *          - Gradient with respect to weights (w): (batch_size, m)
+ *          - Gradient with respect to alpha: (1)
+ */
+std::vector<at::Tensor> vjp(at::Tensor input, at::Tensor output, at::Tensor v, const float alpha = -1) {
+    return jvp(input, output, v, alpha);
+}
+
+/**
+ * Pybind11 module definition for the Soft-Top-k extension.
+ */
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("forward", &forward, "Soft-Top-k forward (CPU)");
+    m.def("jvp", &jvp, "Soft-Top-k jvp (CPU)");
+    m.def("vjp", &vjp, "Soft-Top-k vjp -- backward (CPU)");
+}

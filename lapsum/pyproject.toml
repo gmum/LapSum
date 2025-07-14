@@ -1,0 +1,35 @@
+[build-system]
+requires = [
+    "setuptools>=64.0.0",
+    "wheel",
+    "torch",
+    "ninja"
+]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lapsum"
+version = "0.1.0"
+authors = [
+    {name = "Łukasz Struski", email = "lukasz.struski@uj.edu.pl"}
+]
+description = "Lapsum: Differentiable Ranking and Sorting Extensions for PyTorch"
+keywords = ["top-k", "ranking", "sorting", "pytorch", "cuda", "extensions", "differentiable"]
+readme = "README.md"
+requires-python = ">=3.8"
+license = {text = "MIT"}
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: C++",
+    "Programming Language :: CUDA",
+    "License :: OSI Approved :: MIT License",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence"
+]
+dependencies = [
+    "torch>=2.5.0"
+]
+
+[project.urls]
+Homepage = "https://github.com/gmum/LapSum"
+Repository = "https://github.com/gmum/LapSum"

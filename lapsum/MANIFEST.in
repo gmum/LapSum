@@ -1,0 +1,5 @@
+include README.md
+include pyproject.toml
+recursive-include lapsum/topk/cpu *.cpp
+recursive-include lapsum/topk/cuda *.cpp *.cu *.h *.cuh
+recursive-include lapsum/topk/extension *.so *.pyd *.dll *.py
