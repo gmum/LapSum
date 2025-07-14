@@ -5,8 +5,6 @@ This repository contains the official implementation of **LapSum**, a novel appr
 **"LapSum - One Method to Differentiate Them All: Ranking, Sorting and Top-k Selection"**  
 [arXiv preprint](https://arxiv.org/abs/2503.06242) | [ICML 2025 proceedings](https://proceedings.icml.cc/)  
 
----
-
 ## Repository Structure
 ```
 .
@@ -18,8 +16,6 @@ This repository contains the official implementation of **LapSum**, a novel appr
 └── README.md  # are you here
 ```
 
----
-
 ## Installation CPP/CUDA
 
 The core implementation is available as the `lapsum` Python package. For detailed installation instructions, see [./lapsum/README.md](./lapsum/README.md)
@@ -30,26 +26,22 @@ The core implementation is available as the `lapsum` Python package. For detaile
 - PyTorch: 2.3+
 - CUDA: 12.3 (when using GPU acceleration)
 
-## Reproducing Results
+## Tutorial Notebooks
+For practical examples and educational purposes, see our Jupyter [./tutorial_notebooks/](./tutorial_notebooks/)
 
-### Paper Experiments
+**🚀 Pro Tip:**  If you don't want to compile the CPP/CUDA implementation, you can use the **pure PyTorch version** of the library - it's **almost as fast and memory-efficient** as the CUDA implementation! 
+
+For users less experienced with building libraries from source, we especially recommend using the this implementation - it works out-of-the-box with standard PyTorch installations and doesn't require any additional compilation steps!
+
+## Paper Experiments
 All experimental results from the paper can be reproduced using scripts in [./experiments_of_paper/](./experiments_of_paper/)
-
-
-### Tutorial Notebooks
-For practical examples and educational purposes, see our Jupyter [./notebooks/](./notebooks/)
-
-**🚀 Pro Tip:**  If you don't want to compile the CPP/CUDA implementation, you can use the **pure PyTorch version** of the library - it's **just as fast and memory-efficient** as the CUDA implementation! 
-
----
 
 ## License
 
 This project is open-source under the **MIT License**. For full details, see the [LICENSE](./LICENSE) file.
 
----
 
-## Citation
+### Citation
 
 If you use LapSum in your research, please cite our work:
 
