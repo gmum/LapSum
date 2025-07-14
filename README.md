@@ -41,7 +41,7 @@ All experimental results from the paper can be reproduced using scripts in [./ex
 This project is open-source under the **MIT License**. For full details, see the [LICENSE](./LICENSE) file.
 
 
-### Citation
+## Citation
 
 If you use LapSum in your research, please cite our work:
 
