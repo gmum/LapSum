@@ -26,7 +26,7 @@ The core implementation is available as the `lapsum` Python package. For detaile
 - PyTorch: 2.3+
 - CUDA: 12.3 (when using GPU acceleration)
 
-## Tutorial Notebooks
+## Tutorial Notebooks (Top-K, Rank)
 For practical examples and educational purposes, see our Jupyter [./tutorial_notebooks/](./tutorial_notebooks/)
 
 **🚀 Pro Tip:**  If you don't want to compile the CPP/CUDA implementation, you can use the **pure PyTorch version** of the library - it's **almost as fast and memory-efficient** as the CUDA implementation! 
