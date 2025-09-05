@@ -3,7 +3,7 @@
 This repository contains the official implementation of **LapSum**, a novel approach for differentiable ranking, sorting, and top-k selection, as presented in our ICML 2025 paper:
 
 **"LapSum - One Method to Differentiate Them All: Ranking, Sorting and Top-k Selection"**  
-[arXiv preprint](https://arxiv.org/abs/2503.06242) | [ICML 2025 proceedings](https://proceedings.icml.cc/)  
+[arXiv preprint](https://arxiv.org/abs/2503.06242) | [ICML 2025 proceedings](https://icml.cc/virtual/2025/poster/46060)  
 
 ## Repository Structure
 ```
